@@ -1,9 +1,27 @@
 #include <EEPROM.h> // Storage of pot min/max values
 
-//#define TARGET_TEENSY // Toggle TARGET_TEENSY for Teensy 4.0 else Arduino
+/*
+ * MOSFET Reminder
+ *  Pins: (left to right): G,D,S (Gate, Drain, Source)
+ *  Heatsink is attached to Drain.
+ *  
+ *  Gate goes to Analog out (PWM) on MCU.
+ *  Drain goes to Resistor -- LED -- Vcc.
+ *  Source goes to Ground.
+ *  
+ * Source: https://learn.adafruit.com/rgb-led-strips/usage
+ *  
+ */
+
+
+#define TARGET_TEENSY // Uncomment to TARGET_TEENSY for Teensy 4.0 else Arduino
+#define DEBUG 1
+#define TIMESTEP 10 // ms 
 
 #ifdef TARGET_TEENSY
-#define DEVICE_NAME "LEDdimmer 1.0 (teensy40)
+#define DEVICE_NAME "LEDdimmer 1.0 (teensy40)"
+//#include <InternalTemperature.h> // TARGET_TEENSY 4 library:
+// https://github.com/LAtimes2/InternalTemperature
 // PWM Gating spec
 #define PWM_FREQ 375 // kHz PWM frequency (default 4.482kHz on TARGET_TEENSY 4.0)
 #define PWM_BITS 8 // bits PWM bit-depth (default 8-bit on TARGET_TEENSY 4.0)
@@ -17,7 +35,7 @@
 #define POT_G 17
 #define POT_B 18
 #else // not TARGET_TEENSY
-#define DEVICE_NAME "LEDdimmer 1.0 (arduino)
+#define DEVICE_NAME "LEDdimmer 1.0 (arduino)"
 #define PWM_MAX 255 // i.e. 2**PWM_BITS = 255
 // Gate PINs wired to the gates of three MOSFETs (R,G,B)
 #define GATE_R LED_BUILTIN // pin 13 attached to on board LED
@@ -28,6 +46,7 @@
 #define POT_G 10 // GATE_G - 1
 #define POT_B 8  // GATE_B - 1
 #endif // not TARGET_TEENSY
+
 
 void setup() {
   Serial.begin(115200);
@@ -68,6 +87,8 @@ int pot_b_min = 999;
 int pot_r_max = 0; // Initial maximum is small
 int pot_g_max = 0;
 int pot_b_max = 0;
+char msgbuf[256]; // line buffer to print messages
+
 
 void read_pot() {
   pot_r = analogRead(POT_R); // analog read of potentiometer
@@ -80,6 +101,12 @@ void read_pot() {
     if (pot_r < pot_r_min) pot_r_min = pot_r; // Found new minimum;
     if (pot_g < pot_g_min) pot_g_min = pot_g;
     if (pot_b < pot_b_min) pot_b_min = pot_b;
+  }
+  
+  if (DEBUG) {
+    sprintf(msgbuf, "%-16s: %04d; %04d; %04d;\n",
+      "read_pot", pot_r, pot_g, pot_b  );
+    Serial.write(msgbuf);    
   }
 }
 void read_pot_rom() {
@@ -100,6 +127,12 @@ void read_pot_rom() {
   if (tmp_b_min>=0 && tmp_b_min < tmp_b_max && tmp_b_max < 1024) {
     pot_b_min = tmp_b_min ; pot_b_max = tmp_b_max;
   }
+  if (DEBUG) {
+    sprintf(msgbuf, "read_pot_rom: r_min,r_max; r_min,r_max; r_min,r_max:\n");Serial.write(msgbuf);
+    sprintf(msgbuf, "read_pot_rom: %04d,%04d; %04d,%04d; %04d,%04d.\n",
+      pot_r_min, pot_r_max, pot_g_min, pot_g_max, pot_b_min, pot_b_max );
+    Serial.write(msgbuf);    
+  }
 }
 void write_pot_rom() {
   Serial.println("Writing ROM");
@@ -109,16 +142,32 @@ void write_pot_rom() {
   EEPROM.update(romaddr+3,pot_r_max); // Store maximum pot value
   EEPROM.update(romaddr+4,pot_g_max);
   EEPROM.update(romaddr+5,pot_b_max);
+  if (DEBUG) {
+    sprintf(msgbuf, "write_pot_rom: r_min,r_max; r_min,r_max; r_min,r_max:\n");Serial.write(msgbuf);
+    sprintf(msgbuf, "write_pot_rom: %04d,%04d; %04d,%04d; %04d,%04d.\n",
+      pot_r_min, pot_r_max, pot_g_min, pot_g_max, pot_b_min, pot_b_max );
+    Serial.write(msgbuf);    
+  }
 }
 void calc_pwm(){
   pwm_r = ((int) on_r) * PWM_MAX*abs(pot_r-pot_r_min)/abs(pot_r_max-pot_r_min); // scale pot range to pwm range
   pwm_g = ((int) on_g) * PWM_MAX*abs(pot_g-pot_g_min)/abs(pot_g_max-pot_g_min);
   pwm_b = ((int) on_b) * PWM_MAX*abs(pot_b-pot_b_min)/abs(pot_b_max-pot_b_min);
+//  if (DEBUG) {
+//    sprintf(msgbuf, "calc_pwm: r,g,b = %d; %d; %d;\n", pwm_r, pwm_g, pwm_b);
+//    Serial.write(msgbuf);  
+//  }
 }
 void write_pwm(){
   analogWrite(GATE_R, pwm_r); // apply pwm duty cycle
   analogWrite(GATE_G, pwm_g);
   analogWrite(GATE_B, pwm_b);
+  if (DEBUG) {
+    sprintf(msgbuf, "%-16s: %04d; %04d; %04d;\n",
+      "write_pwm", pwm_r, pwm_g, pwm_b );
+    Serial.write(msgbuf);  
+    
+  }
 }
 
 void parse_command(char *str)
@@ -135,18 +184,24 @@ void parse_command(char *str)
     on_g = on_r;
     on_b = on_r;
     Serial.println("off"); // Always reply something
+  } else if (strcmp(tok, "?") == 0) {
+    sprintf(msgbuf, "%s\n", DEVICE_NAME);
+    Serial.print(msgbuf);
   }
 }
 
 int bootcount = 0;
 void loop() {
-  while (!Serial) ;   // while the serial stream is not open, do nothing
-  if (bootcount < 1) { read_pot_rom() ; bootcount++; }
+  if (bootcount == 5000/TIMESTEP) read_pot_rom(); // read ROM at 5s mark.
+  if (bootcount <= 10000/TIMESTEP) bootcount++; // bootup time lasts up to 10 seconds
+  if (bootcount == 10000/TIMESTEP) {
+    sprintf(msgbuf, "Finished bootup (%s)\n", DEVICE_NAME);
+    Serial.print(msgbuf);
+  } 
+  // Every time, do:
   read_pot();
   calc_pwm();
   write_pwm();
-  delay(250);
-}
 
-//#include <InternalTemperature.h> // TARGET_TEENSY 4 library:
-// https://github.com/LAtimes2/InternalTemperature
+  delay(TIMESTEP);
+}
