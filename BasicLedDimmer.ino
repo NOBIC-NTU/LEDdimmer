@@ -1,5 +1,5 @@
 #include <EEPROM.h> // Storage of pot min/max values
-
+#include "cie1931.h" // cie[256] = { 0...1023 } Look up table for human-friendly luminosity
 /*
  * MOSFET Reminder
  *  Pins: (left to right): G,D,S (Gate, Drain, Source)
@@ -13,19 +13,20 @@
  *  
  */
 
-
-#define TARGET_TEENSY // Uncomment to TARGET_TEENSY for Teensy 4.0 else Arduino
+//#define TARGET_TEENSY // Uncomment to TARGET_TEENSY for Teensy 4.0 else Arduino
 #define DEBUG 1
-#define TIMESTEP 10 // ms 
+#define TIMESTEP 100 // ms 
 
 #ifdef TARGET_TEENSY
+
 #define DEVICE_NAME "LEDdimmer 1.0 (teensy40)"
 //#include <InternalTemperature.h> // TARGET_TEENSY 4 library:
 // https://github.com/LAtimes2/InternalTemperature
 // PWM Gating spec
-#define PWM_FREQ 375 // kHz PWM frequency (default 4.482kHz on TARGET_TEENSY 4.0)
+#define PWM_FREQ 3000 // Hz? kHz? PWM frequency (default 4.482kHz on TARGET_TEENSY 4.0)
 #define PWM_BITS 8 // bits PWM bit-depth (default 8-bit on TARGET_TEENSY 4.0)
-#define PWM_MAX 255 // i.e. 2**PWM_BITS = 255
+#define PWM_MAX 255 // == 2**PWM_BITS-1
+#define POT_MAX 535
 // Gate PINs wired to the gates of three MOSFETs (R,G,B)
 #define GATE_R LED_BUILTIN // pin 13
 #define GATE_G 14
@@ -34,17 +35,21 @@
 #define POT_R 16
 #define POT_G 17
 #define POT_B 18
+
 #else // not TARGET_TEENSY
+
 #define DEVICE_NAME "LEDdimmer 1.0 (arduino)"
 #define PWM_MAX 255 // i.e. 2**PWM_BITS = 255
+#define POT_MAX 688
 // Gate PINs wired to the gates of three MOSFETs (R,G,B)
 #define GATE_R LED_BUILTIN // pin 13 attached to on board LED
 #define GATE_G 11
 #define GATE_B 9
 // Potmeters on Analog ins:
-#define POT_R 12 // GATE_R - 1
-#define POT_G 10 // GATE_G - 1
-#define POT_B 8  // GATE_B - 1
+#define POT_R A0 // GATE_R 
+#define POT_G A1 // GATE_G 
+#define POT_B A2 // GATE_B 
+
 #endif // not TARGET_TEENSY
 
 
@@ -80,13 +85,13 @@ int remote_b = -1;
 int pot_r = 0; // Value between pot_r_min and pot_r_max (depends...)
 int pot_g = 0;
 int pot_b = 0;
-bool auto_pot_limits = 1; // Update limits automatically upon read?
-int pot_r_min = 999; // Initial minimum is big
-int pot_g_min = 999;
-int pot_b_min = 999;
-int pot_r_max = 0; // Initial maximum is small
-int pot_g_max = 0;
-int pot_b_max = 0;
+bool auto_pot_limits = 0; // Update limits automatically upon read?
+int pot_r_min = 0;//999; // Initial minimum is big
+int pot_g_min = 0;//999;
+int pot_b_min = 0;//999;
+int pot_r_max = 535;//0; // Initial maximum is small
+int pot_g_max = 535;//0;
+int pot_b_max = 535;//0;
 char msgbuf[256]; // line buffer to print messages
 
 
@@ -150,16 +155,20 @@ void write_pot_rom() {
   }
 }
 void calc_pwm(){
-  pwm_r = ((int) on_r) * PWM_MAX*abs(pot_r-pot_r_min)/abs(pot_r_max-pot_r_min); // scale pot range to pwm range
-  pwm_g = ((int) on_g) * PWM_MAX*abs(pot_g-pot_g_min)/abs(pot_g_max-pot_g_min);
-  pwm_b = ((int) on_b) * PWM_MAX*abs(pot_b-pot_b_min)/abs(pot_b_max-pot_b_min);
+  // normalize pot range, then
+  // rescale to CIE_SIZE (table length), then
+  // look up CIE 1931 luminosity, then
+  // rescale CIE table output to PWM_MAX range
+  pwm_r = (PWM_MAX/CIE_RANGE) * cie[ ( on_r * (CIE_SIZE * (long) abs(pot_r-pot_r_min)) )/abs(pot_r_max-pot_r_min) ];
+  pwm_g = (PWM_MAX/CIE_RANGE) * cie[ ( on_g * (CIE_SIZE * (long) abs(pot_g-pot_g_min)) )/abs(pot_g_max-pot_g_min) ];
+  pwm_b = (PWM_MAX/CIE_RANGE) * cie[ ( on_b * (CIE_SIZE * (long) abs(pot_b-pot_b_min)) )/abs(pot_b_max-pot_b_min) ];
 //  if (DEBUG) {
 //    sprintf(msgbuf, "calc_pwm: r,g,b = %d; %d; %d;\n", pwm_r, pwm_g, pwm_b);
 //    Serial.write(msgbuf);  
 //  }
 }
 void write_pwm(){
-  analogWrite(GATE_R, pwm_r); // apply pwm duty cycle
+  analogWrite(GATE_R, pwm_r); // apply pwm dut/y cycle
   analogWrite(GATE_G, pwm_g);
   analogWrite(GATE_B, pwm_b);
   if (DEBUG) {
@@ -169,12 +178,27 @@ void write_pwm(){
     
   }
 }
-
-void parse_command(char *str)
-{
+void listen_command() {
+  // Listen for some 
+  if (Serial.available()) {
+    String str = Serial.readStringUntil('\n');
+    char *cmd = (char *)str.c_str();
+    parse_command(cmd);
+  }
+}
+void parse_command(char *cmd) {
   char *tok;
-  tok = strtok(str, " \n");
-  if (strcmp(tok, "on") == 0) {
+  tok = strtok(cmd, " \n");
+  
+  if (strcmp(tok, "?") == 0) {
+    sprintf(msgbuf, "%s\n", DEVICE_NAME);
+    Serial.print(msgbuf);
+  } else if (strcmp(tok, "update") == 0) {
+    read_pot();
+    calc_pwm();
+    write_pwm();
+    Serial.println("updated"); // Always reply something
+  } else if (strcmp(tok, "on") == 0) {
     on_r = true;
     on_g = on_r;
     on_b = on_r;
@@ -184,9 +208,51 @@ void parse_command(char *str)
     on_g = on_r;
     on_b = on_r;
     Serial.println("off"); // Always reply something
-  } else if (strcmp(tok, "?") == 0) {
-    sprintf(msgbuf, "%s\n", DEVICE_NAME);
-    Serial.print(msgbuf);
+  } else if (strcmp(tok, "intensity_percent") == 0) {
+    // intensity_percent <0-100>
+    tok = strtok(NULL, " \n");
+    long percent = strtol(tok, NULL, 10);
+    if (percent>=0 && percent <=100) {
+      // Accepted
+      
+    }
+  } else if (strcmp(tok, "calc?") == 0) {
+    Serial.println("pwm_r = (int) (PWM_MAX/CIE_RANGE) * cie[ ( on_r * (CIE_SIZE * abs(pot_r-pot_r_min)))/abs(pot_r_max-pot_r_min) ];");
+    sprintf(msgbuf, "%04d = (int) (%04d/%04d) * cie[ ( %04d * (%04d * abs(%04d-%04d)))/abs(%04d-%04d) ];\n",
+                     pwm_r, PWM_MAX, CIE_RANGE, on_r, CIE_SIZE, pot_r, pot_r_min, pot_r_max, pot_r_min);
+    Serial.write(msgbuf); 
+    sprintf(msgbuf, "%04d = (int) (%04d) * cie[ ( %04d * (%04d * abs(%04d)))/abs(%04d) ];\n",
+                     pwm_r, PWM_MAX/CIE_RANGE, on_r, CIE_SIZE, pot_r-pot_r_min, pot_r_max-pot_r_min);
+    Serial.write(msgbuf); 
+    sprintf(msgbuf, "%04d = (int) (%04d) * cie[ ( %04d * (%04l))/abs(%04d) ];\n",
+                     pwm_r, PWM_MAX/CIE_RANGE, on_r, CIE_SIZE*  (long)  abs(pot_r-pot_r_min), abs(pot_r_max-pot_r_min));
+    Serial.write(msgbuf); 
+    sprintf(msgbuf, "%04d = (int) (%04d) * cie[ ( %04l )/abs(%04d) ];\n",
+                     pwm_r, PWM_MAX/CIE_RANGE, on_r*CIE_SIZE* (long) abs(pot_r-pot_r_min), abs(pot_r_max-pot_r_min));
+    Serial.write(msgbuf); 
+    sprintf(msgbuf, "%04d = (int) (%04d) * cie[ ( %04l ) ];\n",
+                     pwm_r, PWM_MAX/CIE_RANGE, (on_r*CIE_SIZE* (long) abs(pot_r-pot_r_min))/abs(pot_r_max-pot_r_min));
+    Serial.write(msgbuf); 
+//    sprintf(msgbuf, "%04d = (int) (%04d) * ( %04l ) ;\n",
+//                     pwm_r, PWM_MAX/CIE_RANGE, cie[ (on_r*CIE_SIZE*abs(pot_r-pot_r_min))/abs(pot_r_max-pot_r_min) ]);
+//    Serial.write(msgbuf); 
+//    sprintf(msgbuf, "%04d = (int) ( %04l ) ;\n",
+//                     pwm_r, (PWM_MAX/CIE_RANGE) * cie[ (on_r*CIE_SIZE*abs(pot_r-pot_r_min))/abs(pot_r_max-pot_r_min) ]);
+//    Serial.write(msgbuf); 
+  } else if (strcmp(tok, "pot_range") == 0) {
+    // calibration potmeter@min ..@max
+    tok = strtok(NULL, " \n");
+    long tpot_min = strtol(tok, NULL, 10);
+    tok = strtok(NULL, " \n");
+    long tpot_max = strtol(tok, NULL, 10);
+  } else if (strcmp(tok, "pot_range?") == 0) {
+    sprintf(msgbuf, "pot_range: r_min,r_max; r_min,r_max; r_min,r_max:\n");Serial.write(msgbuf);
+    sprintf(msgbuf, "pot_range: %04d,%04d; %04d,%04d; %04d,%04d.\n",
+      pot_r_min, pot_r_max, pot_g_min, pot_g_max, pot_b_min, pot_b_max );
+    Serial.write(msgbuf);    
+  } else if (strlen(tok) > 2) {
+    sprintf(msgbuf, "Unknown command: '%s'\n", tok);
+    Serial.write(msgbuf);
   }
 }
 
@@ -199,9 +265,10 @@ void loop() {
     Serial.print(msgbuf);
   } 
   // Every time, do:
-  read_pot();
-  calc_pwm();
-  write_pwm();
-
+    read_pot();
+    calc_pwm();
+    write_pwm();
+  listen_command();
+  
   delay(TIMESTEP);
 }
