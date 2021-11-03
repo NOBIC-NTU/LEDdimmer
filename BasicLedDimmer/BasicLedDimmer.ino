@@ -1,3 +1,4 @@
+#include <Encoder.h>
 #include <EEPROM.h> // Storage of pot min/max values
 #include "cie1931.h" // cie[256] = { 0...255 } Look up table for human-friendly luminosity scale
 /*
@@ -13,102 +14,108 @@
 */
 
 /*
-   Remote (serial port) vs Local (potmeter) control behavior. Let's have
-   a simple rule: if remote is adjusted, do it and set the potmeter's guard value;
-   if potmeter is adjusted, dont do it, unless it exceeds the threshold value
+ * Remote (serial port) vs Local (encoder) control behavior.
+ * Let's have a simple rule: if remote is adjusted, do it.
+ * If encoder is adjusted, do it (it's a relative value).
 */
 
-#define DEBUG 0
+/*
+ *  Two channels, each with a different attenuation setting
+ *  Channel 0 (R) goes to 35% of full duty cycle.
+ *  Channel 1 (G) goes to 5% of full duty cycle.
+ */
+
+#define DEBUG 1
 #define TIMESTEP 10 // ms
 
-#define DEVICE_NAME "LEDdimmer 1.0 (arduino, itsybitsy 32u4 5V)"
+#define DEVICE_NAME "LEDdimmer 1.5 (arduino, itsybitsy 32u4 5V)"
 #define PWM_MAX 255 // i.e. 2**PWM_BITS = 255
 #define GATE_R LED_BUILTIN // MOSFET GATE PWM out; pin 13 attached to on board LED
-#define POT_R A0 // POTMETER Analog in
+#define GATE_G 12 // MOSFET GATE PWM out; pin 12
+
+#define ENCODER_USE_INTERRUPTS
+Encoder myEnc(1, 7); // PINS 1 7 are bound to Interrupts #3 #4
+long pos_prev = 0;
+
+const byte togglepin = 0; // PIN 0 Interrupt #2
+volatile bool ch = 0; // Toggle between channels 0 and 1 (false and true)
+
+volatile uint64_t togglestamp = 0;
+void toggleaction() {
+  if (millis() > togglestamp + 10) { // last event was a pause ago
+    togglestamp = millis(); // timestamp this event
+    ch = !ch; // toggle channel
+    if (DEBUG)Serial.println(ch ? "ch B" : "ch A"); // Always reply something
+  }
+}
+
+int get_encoder_delta() {
+  // return the size of the step of the encoder (positive or negative)
+  long pos_curr = myEnc.read();
+  int delta = pos_curr - pos_prev; // calculate position difference
+  //if (delta!=0){
+    pos_prev = pos_curr; // update previous value to current
+  //}
+  return delta;
+}
+
 
 void setup() {
   Serial.begin(115200);
   pinMode(GATE_R, OUTPUT);  // Configure the pin as output
   analogWrite(GATE_R, (int) 1 * PWM_MAX / 100); // 1% duty cycle;
+  pinMode(GATE_G, OUTPUT);  // Configure the pin as output
+  analogWrite(GATE_G, (int) 1 * PWM_MAX / 100); // 1% duty cycle;
+  pinMode(togglepin, INPUT_PULLUP); // Press to bring low, release to trigger RISING event:
+  attachInterrupt(digitalPinToInterrupt(togglepin), toggleaction, RISING);
 }
 
-bool on_r = 1; // Enable LED?
-int romaddr = 0; // EEPROM memory start address
-int pwm_r = 0; // Value between 0 and PWM_MAX
-int pot_r = 0; // Value between pot_r_min and pot_r_max (depends...)
-int pot_r_min = 0;   // Initial minimum :
-int pot_r_max = 512; // Initial maximum
-bool pot_range_auto = 1; // Update limits automatically upon read?
-int pot_guard_t = 2; // threshold value
-int pot_guard_r = -1; // negative: means no guard set.
-int rem_r = -1; // remote control value between 0 and 100 (%), -1 for disable
+bool on_rg[] = {1,1}; // Enable LEDs?
+int pwm_rg[] = {0,0}; // Value between 0 and PWM_MAX
+int pwm_rg_max[] = {35*PWM_MAX/100,5*PWM_MAX/100}; // Custom hard cap on PWM output: 35% and 5%
+int pos_rg[] = {0,0}; // Channel value in encoder units: integer between pos_r_min and pos_r_max
+int pos_rg_min[] = {0,0};  // A single encoder tick is registers +/-4 change,
+int pos_rg_max[] = {96,96}; // a full rotation is 24 ticks (thus pos = 0, 4, ..., 96)
+int rem_rg[] = {0,0}; // Channel value in remote control units (0-100%)
 char msgbuf[256]; // line buffer to print messages
 
-void read_pot() {
-  long tpot = 0;
-  for (int i = 0; i < 5; i++) {
-    tpot += analogRead(POT_R);
-    delay(2);
-  }
-  pot_r = tpot / 5 ; // average pot meter value over 10ms
-  if (pot_range_auto) {
-    if (pot_r > pot_r_max) pot_r_max = pot_r; // Found new maximum
-    if (pot_r < pot_r_min) pot_r_min = pot_r; // Found new minimum;
-  }
-  //  if (DEBUG) {
-  //    sprintf(msgbuf, "%-16s: %04d;\n",
-  //      "read_pot", pot_r  );
-  //    Serial.write(msgbuf);
-  //  }
-}
-void read_pot_rom() {
-  Serial.println("Reading ROM");
-  int tmp_r_min = EEPROM.read(romaddr + 0); // Read ROM address
-  int tmp_r_max = EEPROM.read(romaddr + 1);
-  // Only sane values are accepted (0..min..max..1024)
-  if (tmp_r_min >= 0 && tmp_r_min < tmp_r_max && tmp_r_max < 1024) {
-    pot_r_min = tmp_r_min ; pot_r_max = tmp_r_max;
-  }
-  if (DEBUG) {
-    sprintf(msgbuf, "read_pot_rom: %04d,%04d;\n", pot_r_min, pot_r_max);
-    Serial.write(msgbuf);
-  }
-}
-void write_pot_rom() {
-  Serial.println("Writing ROM");
-  EEPROM.update(romaddr + 0, pot_r_min); // Store minimum pot value
-  EEPROM.update(romaddr + 1, pot_r_max); // Store maximum pot value
-  if (DEBUG) {
-    sprintf(msgbuf, "write_pot_rom: %04d,%04d;\n", pot_r_min, pot_r_max );
-    Serial.write(msgbuf);
-  }
-}
-void set_pwm_by_pot() {
-  // a) normalize pot range, then
+
+void set_pwm_by_enc() {
+  // shorthand
+  int pos = pos_rg[ch];
+  int pos_min = pos_rg_min[ch];
+  int pos_max = pos_rg_max[ch];
+  // Local adjusts pwm
+  // a) normalize encoder range, then
   // b) rescale to CIE_SIZE (table length), then
   // c) look up CIE 1931 luminosity, then
   // d) rescale CIE table output to PWM_MAX range
-  pwm_r = (PWM_MAX / CIE_RANGE) * cie[ ( on_r * (CIE_SIZE * (long) abs(pot_r - pot_r_min)) ) / abs(pot_r_max - pot_r_min) ];
-  // Update remote value (percent)
-  rem_r = ( on_r * (100 * (long) abs(pot_r - pot_r_min)) ) / abs(pot_r_max - pot_r_min);
-  //  if (DEBUG) {
-  //    sprintf(msgbuf, "set_pwm_by_pot: r = %d;\n", pwm_r);
-  //    Serial.write(msgbuf);
-  //  }
+  pwm_rg[ch] = (pwm_rg_max[ch] * cie[ ( on_rg[ch] * (CIE_SIZE * (long) abs(pos - pos_min)) ) / abs(pos_max - pos_min) ]) / CIE_RANGE;
+  // Update remote value (scale pos range to rem range (0-100))
+  rem_rg[ch] = on_rg[ch] * ( 100 * (long) abs(pos - pos_min)) / abs(pos_max - pos_min);
+  if (DEBUG) {
+    sprintf(msgbuf, "set_pwm_by_enc: (ch %s) = %d\n", (ch?"B":"A"), pwm_rg[ch]);
+    Serial.write(msgbuf);
+  }
 }
 void set_pwm_by_rem() {
-  // a) normalize remote range (0..100), then
+  // Remote adjusts pwm
+  // a) normalize remote range, then
   // b) rescale to CIE_SIZE (table length), then
   // c) look up CIE 1931 luminosity, then
   // d) rescale CIE table output to PWM_MAX range
-  pwm_r = (PWM_MAX / CIE_RANGE) * cie[ ( on_r * (CIE_SIZE * (long) rem_r ) ) / 100 ];
-  //  if (DEBUG) {
-  //    sprintf(msgbuf, "set_pwm_by_rem: r = %d;\n", pwm_r);
-  //    Serial.write(msgbuf);
-  //  }
+  int prev_pwm = pwm_rg[ch];
+  pwm_rg[ch] = (pwm_rg_max[ch] * cie[ ( on_rg[ch] * (CIE_SIZE * (long) rem_rg[ch] ) ) / 100 ]) / CIE_RANGE;
+  // Update local pos (scale rem range (0-100) to pos range)
+  pos_rg[ch] = pos_rg_min[ch] + ( on_rg[ch] * abs(pos_rg_max[ch] - pos_rg_min[ch]) * (long) rem_rg[ch] ) / 100;
+  if (DEBUG && prev_pwm != pwm_rg[ch]) {
+    sprintf(msgbuf, "set_pwm_by_rem: (ch %s) = %d\n", (ch?"B":"A"), pwm_rg[ch]);
+    Serial.write(msgbuf);
+  }
 }
 void write_pwm() {
-  analogWrite(GATE_R, pwm_r); // apply pwm duty cycle
+  analogWrite(GATE_R, pwm_rg[0]); // apply pwm duty cycle
+  analogWrite(GATE_G, pwm_rg[1]); // apply pwm duty cycle
 }
 
 void listen_command() {
@@ -126,11 +133,18 @@ void parse_command(char *cmd) {
   if (strcmp(tok, "?") == 0 || strcmp(tok, "name?") == 0) {
     sprintf(msgbuf, "%s\n", DEVICE_NAME);
     Serial.print(msgbuf);
+  } else if (strcmp(tok, "ch?") == 0 || strcmp(tok, "ch?") == 0) {
+    Serial.println(ch ? "ch B" : "ch A"); // channel true is B, false is A
   } else if (strcmp(tok, "on?") == 0 || strcmp(tok, "off?") == 0) {
-    Serial.println(on_r ? "on" : "off");
+    Serial.print(on_rg[0] ? "on " : "off ");
+    Serial.println(on_rg[1] ? "on " : "off ");
+  } else if (strcmp(tok, "A") == 0 || strcmp(tok, "B") == 0) {
+    ch = (strcmp(tok, "B") == 0); // channel B is ch=1
+    Serial.println(ch ? "ch B" : "ch A"); // Always reply something
   } else if (strcmp(tok, "on") == 0 || strcmp(tok, "off") == 0) {
-    on_r = (strcmp(tok, "on") == 0);
-    Serial.println(on_r ? "on" : "off");  // Always reply something
+    on_rg[ch] = (strcmp(tok, "on") == 0);
+    Serial.print(on_rg[0] ? "on " : "off ");
+    Serial.println(on_rg[1] ? "on " : "off "); // Always reply something
   } else if (strcmp(tok, "I") == 0) {
     // remote set intensity (0...100)
     tok = strtok(NULL, " \n");
@@ -138,46 +152,13 @@ void parse_command(char *cmd) {
     if (val < 0 || val > 100) {
       Serial.println("intensity invalid (out of range 0-100)");  // Always reply something
     } else {
-      rem_r = val; // update last known remote value
-      pot_guard_r = pot_r; // enable remote control by setting last known pot value
-      sprintf(msgbuf, "I %d\n", rem_r);
+      rem_rg[ch] = val; // update remote value
+      sprintf(msgbuf, "I %d\n", rem_rg[ch]);
       Serial.write(msgbuf);
     }
   } else if (strcmp(tok, "I?") == 0) {
     // print intensity in percentage, use remote percentage setting
-    sprintf(msgbuf, "I %03d\n", rem_r );
-    Serial.write(msgbuf);
-  } else if (strcmp(tok, "pot_range") == 0) {
-    // set calibration potmeter_min ... potmeter_max
-    tok = strtok(NULL, " \n");
-    long tpot_min = strtol(tok, NULL, 10);
-    tok = strtok(NULL, " \n");
-    long tpot_max = strtol(tok, NULL, 10);
-    if (0 <= tpot_min && tpot_min < tpot_max && tpot_max <= 1024) {
-      pot_r_min = tpot_min;
-      pot_r_max = tpot_max;
-      sprintf(msgbuf, "pot_range: %03d,%03d;\n", pot_r_min, pot_r_max );
-      Serial.write(msgbuf);
-    } else {
-      Serial.println("pot_range invalid (out of range 0-1024)");  // Always reply something
-    }
-  } else if (strcmp(tok, "pot_range?") == 0) {
-    sprintf(msgbuf, "pot_range: %03d,%03d;\n", pot_r_min, pot_r_max );
-    Serial.write(msgbuf);
-  } else if (strcmp(tok, "read_pot_rom") == 0) {
-    read_pot_rom();
-  } else if (strcmp(tok, "write_pot_rom") == 0) {
-    write_pot_rom();
-  } else if (strcmp(tok, "pot_range_auto") == 0) {
-    tok = strtok(NULL, " \n");
-    long val = strtol(tok, NULL, 10);
-    if (val == 1 || val == 0) {
-      pot_range_auto = val;
-    }
-    sprintf(msgbuf, "pot_range_auto: %d;\n", pot_range_auto );
-    Serial.write(msgbuf);
-  } else if (strcmp(tok, "pot_range_auto?") == 0) {
-    sprintf(msgbuf, "pot_range_auto: %d;\n", pot_range_auto );
+    sprintf(msgbuf, "I %03d\n", rem_rg[ch] );
     Serial.write(msgbuf);
   } else if (strlen(tok) > 2) {
     sprintf(msgbuf, "Unknown command: '%s'\n", tok);
@@ -185,41 +166,23 @@ void parse_command(char *cmd) {
   }
 }
 
-
-int bootcount = 0;
 void loop() {
-  if (bootcount == 5000 / TIMESTEP) {
-    read_pot_rom(); // read ROM at 5s mark.
-    sprintf(msgbuf, "%s Ready\n", DEVICE_NAME);
-    Serial.print(msgbuf);
+ 
+  listen_command(); // Listen and process remote control command, if any
+
+  int delta = get_encoder_delta(); // Collect encoder change, if any
+
+  if (delta!=0) { // encoder did step!
+    pos_rg[ch] += delta; // adjust pos value accordingly, but
+    if (pos_rg[ch]>pos_rg_max[ch]) pos_rg[ch] = pos_rg_max[ch]; // clip to range maximum
+    if (pos_rg[ch]<pos_rg_min[ch]) pos_rg[ch] = pos_rg_min[ch]; // clip to range minimum
+    set_pwm_by_enc();   // set PWM value by encoder position
   }
-  if (bootcount <= 10000 / TIMESTEP) bootcount++; // bootup time lasts no more than 10 second
-
-  // Every time, behave:
-
-  listen_command();
-
-  read_pot(); // Read potmeter value
-
-  if ( pot_guard_r < 0 ) // remote control disabled
-    set_pwm_by_pot();   // set PWM by potmeter
-  else {                // remote control enabled
-    set_pwm_by_rem();   // set PWM by remote
-    if ( abs(pot_r - pot_guard_r) > pot_guard_t ) { // pot different from guard value by more than threshold
-      if ( (pot_r > pot_guard_r && pot_r > pot_r_max * (long)rem_r / 100) ||
-           (pot_r < pot_guard_r && pot_r < pot_r_max * (long)rem_r / 100) ) { // pot increasing(decreasing and greater(less) than remote
-        pot_guard_r = -pot_guard_t; // disable remote, listen to pot again.
-      }
-    }
+  else { // encoder was untouched, allow remote change, if any
+    set_pwm_by_rem();   // set PWM value by remote value
   }
-
-  //  if (DEBUG) {
-  //    sprintf(msgbuf, "pot_r: %03d<%03d<%03d; guard: %03d; thres: %03d; rem_r: %03d; pwm_r: %03d;\n",
-  //                   pot_r_min, pot_r, pot_r_max, pot_guard_r, pot_guard_t, (word)rem_r*pot_r_max/100, pwm_r);
-  //    Serial.print(msgbuf);
-  //  }
-
-  write_pwm(); // update pwm
+ 
+  write_pwm(); // sync pwm value, update hardware PWM setting.
 
   delay(TIMESTEP);
 }
