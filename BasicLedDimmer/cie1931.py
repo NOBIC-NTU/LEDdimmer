@@ -5,13 +5,13 @@ INT_TYPE = 'const unsigned int'
 TABLE_NAME = 'cie'
 
 def cie1931(L):
-    L = L*103.4;  # instead of 100.0, so that it nicely ends at 255 as maximum value
+    L = L*103;  # instead of 100.0, so that it nicely ends at 255 as maximum value
     if L <= 8:
         return (L/903.3)
     else:
         return ((L+16.0)/119.0)**3
 
-x = range(0, int(CIE_SIZE))
+x = range(0, int(CIE_SIZE+1))
 y = [round(cie1931(float(L) / CIE_SIZE) * CIE_RANGE) for L in x]
 
 with open('cie1931.h', 'w') as f:
@@ -23,7 +23,9 @@ with open('cie1931.h', 'w') as f:
     f.write('%s %s[CIE_SIZE+1] = {\n' % (INT_TYPE, TABLE_NAME))
     f.write('\t')
     for i,L in enumerate(y):
+        print(i,L)
         f.write('%3d,' % int(L))
         if i % 10 == 9:
             f.write('\n\t')
     f.write('\n};\n')
+
