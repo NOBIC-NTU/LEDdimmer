@@ -21,13 +21,13 @@
 /*
  *  Two channels, each with a different attenuation setting
  *  Channel 0 (A) goes to 35% of full duty cycle.
- *  Channel 1 (B) goes to 5% of full duty cycle.
+ *  Channel 1 (B) goes to 5% of full duty cycle. (disabled in v1.5.1b)
  */
 
 #define DEBUG 0
 #define TIMESTEP 10 // ms
 
-#define DEVICE_NAME "LEDdimmer 1.5.1 (arduino, itsybitsy 32u4 5V)"
+#define DEVICE_NAME "LEDdimmer 1.5.1b (arduino, itsybitsy 32u4 5V)"
 #define PWM_MAX 255 // i.e. 2**PWM_BITS = 255
 #define GATE_A LED_BUILTIN // MOSFET GATE PWM out; pin 13 attached to on board LED
 #define GATE_B 11 // MOSFET GATE PWM out; pin 11 (12 has no PWM support)
@@ -41,6 +41,7 @@ volatile bool ch = 0; // Toggle between channels 0 and 1 (false and true)
 
 volatile uint64_t togglestamp = 0;
 void toggleaction() {
+  return; // v1.5.1b DISABLE TOGGLE ACTION : keep channel A only
   if (millis() > togglestamp + 100) { // last event was a pause ago
     togglestamp = millis(); // timestamp this event
     ch = !ch; // toggle channel
@@ -139,8 +140,9 @@ void parse_command(char *cmd) {
     Serial.print(on_rg[0] ? "on " : "off ");
     Serial.println(on_rg[1] ? "on " : "off ");
   } else if (strcmp(tok, "A") == 0 || strcmp(tok, "B") == 0) {
-    ch = (strcmp(tok, "B") == 0); // channel B is ch=1
-    Serial.println(ch ? "ch B" : "ch A"); // Always reply something
+    //ch = (strcmp(tok, "B") == 0); // channel B is ch=1
+    //Serial.println(ch ? "ch B" : "ch A"); // Always reply something
+    Serial.println("ch A"); // v1.5.1b: Channel B is disabled
   } else if (strcmp(tok, "on") == 0 || strcmp(tok, "off") == 0) {
     on_rg[ch] = (strcmp(tok, "on") == 0);
     Serial.print(on_rg[0] ? "on " : "off ");
