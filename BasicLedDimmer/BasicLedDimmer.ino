@@ -25,6 +25,7 @@
  */
 
 #define DEBUG 0
+#define DUALCHAN 1 // 0:single 1:dual chan mode
 #define TIMESTEP 10 // ms
 
 #define DEVICE_NAME "LEDdimmer 1.5.1 (arduino, itsybitsy 32u4 5V)"
@@ -41,9 +42,9 @@ volatile bool ch = 0; // Toggle between channels 0 and 1 (false and true)
 
 volatile uint64_t togglestamp = 0;
 void toggleaction() {
-  if (millis() > togglestamp + 100) { // last event was a pause ago
+  if (millis() > togglestamp + 10) { // last event was a pause ago
     togglestamp = millis(); // timestamp this event
-    ch = !ch; // toggle channel
+    if (DUALCHAN) ch = !ch; // toggle channel
     if (DEBUG) Serial.println(ch ? "ch B" : "ch A"); // Always reply something
   }
 }
@@ -52,7 +53,9 @@ int get_encoder_delta() {
   // return the size of the step of the encoder (positive or negative)
   long pos_curr = myEnc.read();
   int delta = pos_curr - pos_prev; // calculate position difference
-  pos_prev = pos_curr; // update previous value to current
+  if (delta != 0) {
+    pos_prev = pos_curr; // update previous value to current
+  }
   return delta;
 }
 
@@ -73,28 +76,21 @@ int pwm_rg[] = {0,0}; // Value between 0 and PWM_MAX
 // Look up in CIE array what index has 35% of 255 = 89.25 = 89 -> 168
 //                        and which has 5% of 255 = 12.75 = 12 -> 68
 int pwm_rg_max[] = {168,69};
-int pos_rg[] = {0,0}; // Channel value in encoder units: integer between pos_r_min and pos_r_max
-int pos_rg_min[] = {0,0};  // A single encoder tick is registers +/-4 change,
-int pos_rg_max[] = {96,96}; // a full rotation is 24 ticks (thus pos = 0, 4, ..., 96)
+int pos_rg[] = {0,0}; // Channel value in encoder units (0-100 ~ 96=24 ticks*4 delta per tick)
 int rem_rg[] = {0,0}; // Channel value in remote control units (0-100%)
 char msgbuf[256]; // line buffer to print messages
 
-
 void set_pwm_by_enc() {
-  // shorthand
-  int pos = pos_rg[ch];
-  int pos_min = pos_rg_min[ch];
-  int pos_max = pos_rg_max[ch];
   // Local adjusts pwm
   // a) normalize encoder range, then
   // b) rescale to CIE_SIZE (table length), then
   // c) look up CIE 1931 luminosity, then
   // d) rescale CIE table output to PWM_MAX range
-  pwm_rg[ch] = (pwm_rg_max[ch] * cie[ ( on_rg[ch] * (CIE_SIZE * (long) abs(pos - pos_min)) ) / abs(pos_max - pos_min) ]) / CIE_RANGE;
+  pwm_rg[ch] = pwm_rg_max[ch] * cie[ on_rg[ch] * CIE_SIZE * pos_rg[ch] / 100 ] / CIE_RANGE;
   // Update remote value (scale pos range to rem range (0-100))
-  rem_rg[ch] = on_rg[ch] * ( 100 * (long) abs(pos - pos_min)) / abs(pos_max - pos_min);
+  rem_rg[ch] = on_rg[ch] * pos_rg[ch] ;
   if (DEBUG) {
-    sprintf(msgbuf, "set_pwm_by_enc: (ch %s) = %d\n", (ch?"B":"A"), pwm_rg[ch]);
+    sprintf(msgbuf, "set_pwm_by_enc: (ch %s) = %d, pos: %d\n", (ch?"B":"A"), pwm_rg[ch], pos_rg[ch]);
     Serial.write(msgbuf);
   }
 }
@@ -105,9 +101,9 @@ void set_pwm_by_rem() {
   // c) look up CIE 1931 luminosity, then
   // d) rescale CIE table output to PWM_MAX range
   int prev_pwm = pwm_rg[ch];
-  pwm_rg[ch] = (pwm_rg_max[ch] * cie[ ( on_rg[ch] * (CIE_SIZE * (long) rem_rg[ch] ) ) / 100 ]) / CIE_RANGE;
-  // Update local pos (scale rem range (0-100) to pos range)
-  pos_rg[ch] = pos_rg_min[ch] + ( on_rg[ch] * abs(pos_rg_max[ch] - pos_rg_min[ch]) * (long) rem_rg[ch] ) / 100;
+  pwm_rg[ch] = pwm_rg_max[ch] * cie[ on_rg[ch] * CIE_SIZE * rem_rg[ch] / 100 ] / CIE_RANGE;
+  // Update local pos
+  pos_rg[ch] = on_rg[ch] * (long) rem_rg[ch] ;
   if (DEBUG && prev_pwm != pwm_rg[ch]) {
     sprintf(msgbuf, "set_pwm_by_rem: (ch %s) = %d\n", (ch?"B":"A"), pwm_rg[ch]);
     Serial.write(msgbuf);
@@ -139,12 +135,13 @@ void parse_command(char *cmd) {
     Serial.print(on_rg[0] ? "on " : "off ");
     Serial.println(on_rg[1] ? "on " : "off ");
   } else if (strcmp(tok, "A") == 0 || strcmp(tok, "B") == 0) {
-    ch = (strcmp(tok, "B") == 0); // channel B is ch=1
+    if (DUALCHAN) ch = (strcmp(tok, "B") == 0); // channel B is ch=1
     Serial.println(ch ? "ch B" : "ch A"); // Always reply something
   } else if (strcmp(tok, "on") == 0 || strcmp(tok, "off") == 0) {
     on_rg[ch] = (strcmp(tok, "on") == 0);
-    Serial.print(on_rg[0] ? "on " : "off ");
-    Serial.println(on_rg[1] ? "on " : "off "); // Always reply something
+    Serial.print(on_rg[0] ? "on" : "off"); // Always reply something
+    if (DUALCHAN) Serial.print(on_rg[1] ? "  on" : " off");
+    Serial.println();
   } else if (strcmp(tok, "I") == 0) {
     // remote set intensity (0...100)
     tok = strtok(NULL, " \n");
@@ -174,8 +171,8 @@ void loop() {
 
   if (delta!=0) { // encoder did step!
     pos_rg[ch] += delta; // adjust pos value accordingly, but
-    if (pos_rg[ch]>pos_rg_max[ch]) pos_rg[ch] = pos_rg_max[ch]; // clip to range maximum
-    if (pos_rg[ch]<pos_rg_min[ch]) pos_rg[ch] = pos_rg_min[ch]; // clip to range minimum
+    if (pos_rg[ch]>100) pos_rg[ch] = 100; // clip to range maximum
+    if (pos_rg[ch]<0) pos_rg[ch] = 0; // clip to range minimum
     set_pwm_by_enc();   // set PWM value by encoder position
   }
   else { // encoder was untouched, allow remote change, if any
