@@ -1,5 +1,4 @@
 #include <Encoder.h>
-#include <EEPROM.h> // Storage of pot min/max values
 #include "cie1931.h" // cie[256] = { 0...255 } Look up table for human-friendly luminosity scale
 /*
    MOSFET Mini How To
@@ -21,17 +20,17 @@
 
 /*
  *  Two channels, each with a different attenuation setting
- *  Channel 0 (R) goes to 35% of full duty cycle.
- *  Channel 1 (G) goes to 5% of full duty cycle.
+ *  Channel 0 (A) goes to 35% of full duty cycle.
+ *  Channel 1 (B) goes to 5% of full duty cycle.
  */
 
-#define DEBUG 1
+#define DEBUG 0
 #define TIMESTEP 10 // ms
 
-#define DEVICE_NAME "LEDdimmer 1.5 (arduino, itsybitsy 32u4 5V)"
+#define DEVICE_NAME "LEDdimmer 1.5.1 (arduino, itsybitsy 32u4 5V)"
 #define PWM_MAX 255 // i.e. 2**PWM_BITS = 255
-#define GATE_R LED_BUILTIN // MOSFET GATE PWM out; pin 13 attached to on board LED
-#define GATE_G 12 // MOSFET GATE PWM out; pin 12
+#define GATE_A LED_BUILTIN // MOSFET GATE PWM out; pin 13 attached to on board LED
+#define GATE_B 11 // MOSFET GATE PWM out; pin 11 (12 has no PWM support)
 
 #define ENCODER_USE_INTERRUPTS
 Encoder myEnc(1, 7); // PINS 1 7 are bound to Interrupts #3 #4
@@ -42,10 +41,10 @@ volatile bool ch = 0; // Toggle between channels 0 and 1 (false and true)
 
 volatile uint64_t togglestamp = 0;
 void toggleaction() {
-  if (millis() > togglestamp + 10) { // last event was a pause ago
+  if (millis() > togglestamp + 100) { // last event was a pause ago
     togglestamp = millis(); // timestamp this event
     ch = !ch; // toggle channel
-    if (DEBUG)Serial.println(ch ? "ch B" : "ch A"); // Always reply something
+    if (DEBUG) Serial.println(ch ? "ch B" : "ch A"); // Always reply something
   }
 }
 
@@ -53,26 +52,27 @@ int get_encoder_delta() {
   // return the size of the step of the encoder (positive or negative)
   long pos_curr = myEnc.read();
   int delta = pos_curr - pos_prev; // calculate position difference
-  //if (delta!=0){
-    pos_prev = pos_curr; // update previous value to current
-  //}
+  pos_prev = pos_curr; // update previous value to current
   return delta;
 }
 
 
 void setup() {
   Serial.begin(115200);
-  pinMode(GATE_R, OUTPUT);  // Configure the pin as output
-  analogWrite(GATE_R, (int) 1 * PWM_MAX / 100); // 1% duty cycle;
-  pinMode(GATE_G, OUTPUT);  // Configure the pin as output
-  analogWrite(GATE_G, (int) 1 * PWM_MAX / 100); // 1% duty cycle;
+  pinMode(GATE_A, OUTPUT);  // Configure the pin as output
+  analogWrite(GATE_A, (int) 1 * PWM_MAX / 100); // 1% duty cycle;
+  pinMode(GATE_B, OUTPUT);  // Configure the pin as output
+  analogWrite(GATE_B, (int) 1 * PWM_MAX / 100); // 1% duty cycle;
   pinMode(togglepin, INPUT_PULLUP); // Press to bring low, release to trigger RISING event:
   attachInterrupt(digitalPinToInterrupt(togglepin), toggleaction, RISING);
 }
 
 bool on_rg[] = {1,1}; // Enable LEDs?
 int pwm_rg[] = {0,0}; // Value between 0 and PWM_MAX
-int pwm_rg_max[] = {35*PWM_MAX/100,5*PWM_MAX/100}; // Custom hard cap on PWM output: 35% and 5%
+// Custom hard cap on PWM output: 35% and 5%, since luminosity isnt linear:
+// Look up in CIE array what index has 35% of 255 = 89.25 = 89 -> 168
+//                        and which has 5% of 255 = 12.75 = 12 -> 68
+int pwm_rg_max[] = {168,69};
 int pos_rg[] = {0,0}; // Channel value in encoder units: integer between pos_r_min and pos_r_max
 int pos_rg_min[] = {0,0};  // A single encoder tick is registers +/-4 change,
 int pos_rg_max[] = {96,96}; // a full rotation is 24 ticks (thus pos = 0, 4, ..., 96)
@@ -114,8 +114,8 @@ void set_pwm_by_rem() {
   }
 }
 void write_pwm() {
-  analogWrite(GATE_R, pwm_rg[0]); // apply pwm duty cycle
-  analogWrite(GATE_G, pwm_rg[1]); // apply pwm duty cycle
+  analogWrite(GATE_A, pwm_rg[0]); // apply pwm duty cycle
+  analogWrite(GATE_B, pwm_rg[1]); // apply pwm duty cycle
 }
 
 void listen_command() {
@@ -167,7 +167,7 @@ void parse_command(char *cmd) {
 }
 
 void loop() {
- 
+
   listen_command(); // Listen and process remote control command, if any
 
   int delta = get_encoder_delta(); // Collect encoder change, if any
@@ -181,7 +181,7 @@ void loop() {
   else { // encoder was untouched, allow remote change, if any
     set_pwm_by_rem();   // set PWM value by remote value
   }
- 
+
   write_pwm(); // sync pwm value, update hardware PWM setting.
 
   delay(TIMESTEP);
