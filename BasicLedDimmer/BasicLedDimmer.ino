@@ -28,7 +28,7 @@
 #define DUALCHAN 1 // 0:single 1:dual chan mode
 #define TIMESTEP 10 // ms
 
-#define DEVICE_NAME "LEDdimmer 1.5.1 (arduino, itsybitsy 32u4 5V)"
+#define DEVICE_NAME "LEDdimmer 1.5.2 (arduino, itsybitsy 32u4 5V)"
 #define PWM_MAX 255 // i.e. 2**PWM_BITS = 255
 #define GATE_A LED_BUILTIN // MOSFET GATE PWM out; pin 13 attached to on board LED
 #define GATE_B 11 // MOSFET GATE PWM out; pin 11 (12 has no PWM support)
