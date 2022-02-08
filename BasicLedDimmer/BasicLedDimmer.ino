@@ -72,10 +72,10 @@ void setup() {
 
 bool on_rg[] = {1,1}; // Enable LEDs?
 int pwm_rg[] = {0,0}; // Value between 0 and PWM_MAX
-// Custom hard cap on PWM output: 35% and 5%, since luminosity isnt linear:
-// Look up in CIE array what index has 35% of 255 = 89.25 = 89 -> 168
-//                        and which has 5% of 255 = 12.75 = 12 -> 68
-int pwm_rg_max[] = {168,69};
+// Custom hard cap on PWM output: 35% and 5%
+// 35% of 255 = 89.25
+//  5% of 255 = 12.75
+int pwm_rg_max[] =  {89, 12};
 int pos_rg[] = {0,0}; // Channel value in encoder units (0-100 ~ 96=24 ticks*4 delta per tick)
 int rem_rg[] = {0,0}; // Channel value in remote control units (0-100%)
 char msgbuf[256]; // line buffer to print messages
